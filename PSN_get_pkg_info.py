@@ -12,11 +12,9 @@
 ### git master repository at https://github.com/windsurfer1122
 ### Read README.md for more information including Python requirements and more
 ###
-### Workarounds for Python 2 (see: http://python-future.org/compatible_idioms.html)
-### - use of struct.unpack() instead of int.from_bytes()
+### Python 2 backward-compatible workarounds:
 ### - convert byte string of struct.pack() to bytes
-### - use future print function
-### - use future unicode literals
+### - define unicode() for Python 3 like in Python 2  (ugly)
 ###
 ### Adopted PEP8 Coding Style:
 ### * [joined_]lower for attributes, variables
@@ -41,14 +39,14 @@
 ### along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ###
 
-### Python 2 workarounds:
+### Python 2 future-compatible workarounds: (see: http://python-future.org/compatible_idioms.html)
 ## a) prevent interpreting print(a,b) as a tuple plus support print(a, file=sys.stderr)
 from __future__ import print_function
 ## b) interpret all literals as unicode
 from __future__ import unicode_literals
 ## c) same division handling ( / = float, // = integer)
 from __future__ import division
-## d) interpret long as int
+## d) interpret long as int, support int.from_bytes()
 from builtins import int
 ## e) support bytes()
 from builtins import bytes
@@ -64,7 +62,6 @@ import getopt
 import re
 import traceback
 import json
-import binascii
 
 import Cryptodome.Cipher.AES
 import Cryptodome.Util.Counter
@@ -130,23 +127,23 @@ if sys.getdefaultencoding().lower() != "utf-8":
 ## General debug information related to Python and Unicode
 if DebugLevel >= 1:
     ## List encodings
-    dprint("Python Version {}".format(sys.version))
-    dprint("DEFAULT Encoding {}".format(sys.getdefaultencoding()))
-    dprint("LOCALE Encoding {}".format(locale.getpreferredencoding()))
+    dprint("Python Version", sys.version)
+    dprint("DEFAULT Encoding", sys.getdefaultencoding())
+    dprint("LOCALE Encoding", locale.getpreferredencoding())
     dprint("STDOUT Encoding {} Terminal {}".format(sys.stdout.encoding, sys.stdout.isatty()))
     dprint("STDERR Encoding {} Terminal {}".format(sys.stderr.encoding, sys.stderr.isatty()))
-    dprint("FILESYS Encoding {}".format(sys.getfilesystemencoding()))
+    dprint("FILESYS Encoding", sys.getfilesystemencoding())
     value = ""
     if "PYTHONIOENCODING" in os.environ:
         value = os.environ["PYTHONIOENCODING"]
-    dprint("PYTHONIOENCODING={}".format(value))
+    dprint("PYTHONIOENCODING=", value, sep="")
     ## Check Unicode
     dprint("ö ☺ ☻")
 
 ## Python 2/3 workaround: define unicode for Python 3 like in Python 2
 ## Unfortunately a backward-compatible workaround, as I couldn't find a forward-compatible one :(
 ## Every string is Unicode
-## https://stackoverflow.com/questions/34803467/unexpected-exception-name-basestring-is-not-defined-when-invoking-ansible2
+## https://stackoverflow.com/questions/34803467/unexpected-exception-title-basestring-is-not-defined-when-invoking-ansible2
 try:
     unicode
 except:
@@ -159,6 +156,8 @@ except:
 OutputFormatsKnown = {
    0: "Human-readable Output [default]",
    1: "Linux Shell Variable Output",
+   97: "NPS Output in JSON format",
+   98: "Analysis Output in JSON format",
    99: "Analysis Output",
 }
 #
@@ -304,7 +303,7 @@ CONST_PKG4_MAIN_HEADER_FIELDS = collections.OrderedDict([ \
 ## >>> Could be 2x 136 bytes structure from before
     ( "UNKNOWN5",     { "FORMAT": "s", "SIZE": -0x5a0, "DEBUG": 3, "DESC": "Unknown", "SKIP": True, }, ),
 ## <<< Could be 2x 136 bytes structure from before
-## real size looks like it is 0x2000
+## real fileSize looks like it is 0x2000
 ])
 #
 ## --> File Entry Table
@@ -321,7 +320,7 @@ CONST_PKG4_FILE_ENTRY_FIELDS = collections.OrderedDict([ \
 ])
 #
 ## --> Name Table
-##     Name Table is 0-indexed, index 0 is an empty name
+##     Name Table is 0-indexed, index 0 is an empty title
 CONST_PKG4_FILE_ENTRY_ID_DIGEST_TABLE = 0x0001
 CONST_PKG4_FILE_ENTRY_ID_ENTRY_KEYS   = 0x0010
 CONST_PKG4_FILE_ENTRY_ID_IMAGE_KEY    = 0x0020
@@ -477,6 +476,14 @@ def getInteger64BitBE(data, offset):
     return struct.unpack(">Q", data[offset:offset+8])[0]
 
 
+def to_json(python_object):
+    if isinstance(python_object, bytes):
+        return {'__class__': 'bytes',
+                '__value__': list(python_object)}
+    if isinstance(python_object, PkgAesCtrCounter):
+        return
+    raise TypeError(repr(python_object) + ' is not JSON serializable')
+
 def convertBytesToHexString(data, format="", sep=" "):
     if isinstance(data, int):
         data = struct.pack(format, data)
@@ -487,18 +494,15 @@ def convertBytesToHexString(data, format="", sep=" "):
     return sep.join(["%02x" % b for b in data])
 
 
-def convertBytesToIntegerValue(data):
-    return int(binascii.hexlify(data), 16)
-
-def calculateAesAlignedOffsetAndSize(offset, size):
+def calculateAesAlignedOffsetAndSize(offset, fileSize):
     aligned_offset_delta = offset & ( Cryptodome.Cipher.AES.block_size - 1 )
     aligned_offset = offset - aligned_offset_delta
 
-    aligned_size_delta = size & ( Cryptodome.Cipher.AES.block_size - 1 )
+    aligned_size_delta = fileSize & ( Cryptodome.Cipher.AES.block_size - 1 )
     if aligned_size_delta > 0:
         aligned_size_delta = Cryptodome.Cipher.AES.block_size - aligned_size_delta
     aligned_size_delta += aligned_offset_delta
-    aligned_size = size + aligned_size_delta
+    aligned_size = fileSize + aligned_size_delta
 
     return aligned_offset, aligned_size, aligned_offset_delta, aligned_size_delta
 
@@ -541,20 +545,20 @@ class PkgReader():
             self._size = self._data_stream.tell()
 
         if debug_level >= 3:
-            dprint("Data stream is of class {}".format(self._data_stream.__class__.__name__))
+            dprint("Data stream is of class", self._data_stream.__class__.__name__)
 
     def getSize(self, debug_level=0):
         return self._size
 
-    def read(self, offset, size, debug_level=0):
+    def read(self, offset, fileSize, debug_level=0):
         if self._stream_type == "file":
             self._data_stream.seek(offset, os.SEEK_SET)
-            return self._data_stream.read(size)
+            return self._data_stream.read(fileSize)
         elif self._stream_type == "requests":
             ## Send request in persistent session
             ## http://docs.python-requests.org/en/master/api/#requests.Session.get
             ## http://docs.python-requests.org/en/master/api/#requests.request
-            reqheaders={"Range": "bytes={}-{}".format(offset, offset + size - 1)}
+            reqheaders={"Range": "bytes={}-{}".format(offset, offset + fileSize - 1)}
             response = self._data_stream.get(self._source, headers=reqheaders)
             return response.content
 
@@ -570,7 +574,7 @@ class PkgAesCtrCounter():
             self._iv = iv
         elif isinstance(iv, bytes) \
         or isinstance(iv, bytearray):
-            self._iv = convertBytesToIntegerValue(iv)
+            self._iv = int.from_bytes(iv, byteorder="big")
         self._block_offset = -1
 
     def _setOffset(self, offset):
@@ -885,13 +889,13 @@ def parsePkg4Header(headerbytes):
         dprint(">>>>> PKG4 File Entry Table:")
     pkg_file_table_size = headerfields["FILECNT"] * CONST_PKG4_FILE_ENTRY_FIELDS["STRUCTURE_SIZE"]
     if function_debug_level >= 2:
-        dprint("Get PKG4 file entry table from offset {:#x} with count {} and size {}".format(headerfields["FILETBLOFS"], headerfields["FILECNT"], pkg_file_table_size))
+        dprint("Get PKG4 file entry table from offset {:#x} with count {} and fileSize {}".format(headerfields["FILETBLOFS"], headerfields["FILECNT"], pkg_file_table_size))
     tempbytes = bytearray()
     try:
         tempbytes.extend(DataStream.read(headerfields["FILETBLOFS"], pkg_file_table_size, function_debug_level))
     except:
         DataStream.close(function_debug_level)
-        eprint("\nERROR: {}: Could not get PKG4 file entry table at offset {:#x} with size {} from {}".format(sys.argv[0], headerfields["FILETBLOFS"], pkg_file_table_size, Source))
+        eprint("\nERROR: {}: Could not get PKG4 file entry table at offset {:#x} with fileSize {} from {}".format(sys.argv[0], headerfields["FILETBLOFS"], pkg_file_table_size, Source))
         sys.exit(2)
 
     ## Parse PKG4 File Entry Table Data
@@ -925,13 +929,13 @@ def parsePkg4Header(headerbytes):
     else:
         fileentry = filetable[filetablemap[CONST_PKG4_FILE_ENTRY_ID_NAME_TABLE]]
         if function_debug_level >= 2:
-                dprint("Get PKG4 name table from offset {:#x} with size {}".format(fileentry["DATAOFS"], fileentry["DATASIZE"]))
+                dprint("Get PKG4 title table from offset {:#x} with fileSize {}".format(fileentry["DATAOFS"], fileentry["DATASIZE"]))
         nametable = bytearray()
         try:
             nametable.extend(DataStream.read(fileentry["DATAOFS"], fileentry["DATASIZE"], function_debug_level))
         except:
             DataStream.close(function_debug_level)
-            eprint("\nERROR: {}: Could not get PKG4 name table at offset {:#x} with size {} from {}".format(sys.argv[0], fileentry["DATAOFS"], fileentry["DATASIZE"], Source))
+            eprint("\nERROR: {}: Could not get PKG4 title table at offset {:#x} with fileSize {} from {}".format(sys.argv[0], fileentry["DATAOFS"], fileentry["DATASIZE"], Source))
             sys.exit(2)
         nametable = bytes(nametable)
 
@@ -961,7 +965,7 @@ def parsePkg4Header(headerbytes):
     dprintFieldsList(filetable, "".join(("filetable[{KEY:", filecntlen, "}]")), function_debug_level, None)
     if function_debug_level >= 2:
         dprintFieldsDict(filetablemap, "filetablemap[{KEY:#06x}]", function_debug_level, None)
-        dprint("nametable: {}".format(nametable))
+        dprint("nametable:", nametable)
 
     return headerfields, filetable, filetablemap
 
@@ -1010,13 +1014,13 @@ def parsePkg3Header(headerbytes):
 
     ## Retrieve PKG3 Unencrypted Data from data stream
     if function_debug_level >= 2:
-        dprint("Get PKG3 remaining unencrypted data with size {}".format(headerfields["DATAOFS"]))
+        dprint("Get PKG3 remaining unencrypted data with fileSize", headerfields["DATAOFS"])
     unencrypted = headerbytes
     try:
         unencrypted.extend(DataStream.read(CONST_PKG3_MAIN_HEADER_FIELDS["STRUCTURE_SIZE"], headerfields["DATAOFS"] - CONST_PKG3_MAIN_HEADER_FIELDS["STRUCTURE_SIZE"], function_debug_level))
     except:
         DataStream.close(function_debug_level)
-        eprint("\nERROR: {}: Could not get PKG3 unencrypted data at offset {:#x} with size {} from {}".format(sys.argv[0], CONST_PKG3_MAIN_HEADER_FIELDS["STRUCTURE_SIZE"], headerfields["DATAOFS"] - CONST_PKG3_MAIN_HEADER_FIELDS["STRUCTURE_SIZE"], Source))
+        eprint("\nERROR: {}: Could not get PKG3 unencrypted data at offset {:#x} with fileSize {} from {}".format(sys.argv[0], CONST_PKG3_MAIN_HEADER_FIELDS["STRUCTURE_SIZE"], headerfields["DATAOFS"] - CONST_PKG3_MAIN_HEADER_FIELDS["STRUCTURE_SIZE"], Source))
         sys.exit(2)
 
     ## Extract fields from PKG3 Extended Header
@@ -1047,12 +1051,12 @@ def parsePkg3Header(headerbytes):
             if headerfields["KEYINDEX"] == 2:  ## PSV
                 headerfields["PARAM.SFO"] = "sce_sys/param.sfo"
             elif headerfields["KEYINDEX"] == 3:  ## Unknown
-                eprint("!!! PKG3 Key Index {}".format(headerfields["KEYINDEX"]))
+                eprint("!!! PKG3 Key Index", headerfields["KEYINDEX"])
         else:  ## PSX/PSP
             headerfields["KEYINDEX"] = 1
             headerfields["PARAM.SFO"] = "PARAM.SFO"
     else:
-        eprint("!!! PKG3 Package Type {}".format(headerfields["TYPE"]))
+        eprint("!!! PKG3 Package Type", headerfields["TYPE"])
     #
     headerfields["AES_CTR"] = {}
     for key in CONST_PKG3_CONTENT_KEYS:
@@ -1103,7 +1107,7 @@ def parsePkg3Header(headerbytes):
             elif md_type == 0x02:
                 metadata[md_type]["DESC"] = "Content Type"
             metadata[md_type]["VALUE"] = getInteger32BitBE(tempbytes, 0)
-        ## TitleID (when size 0xc) (otherwise Version + App Version)
+        ## TitleID (when fileSize 0xc) (otherwise Version + App Version)
         elif md_type == 0x06 \
         and md_size == 0x0C:
             metadata[md_type]["DESC"] = "Title ID"
@@ -1170,13 +1174,13 @@ def parsePkg3ItemEntries(headerfields):
     ## Retrieve PKG3 Item Entries from data stream
     item_entries_size = headerfields["ITEMCNT"] * CONST_PKG3_ITEM_ENTRY_FIELDS["STRUCTURE_SIZE"]
     if function_debug_level >= 2:
-        dprint("Get PKG3 item entries from encrypted data with offset {:#x} with count {} and size {}".format(headerfields["DATAOFS"], headerfields["ITEMCNT"], item_entries_size))
+        dprint("Get PKG3 item entries from encrypted data with offset {:#x} with count {} and fileSize {}".format(headerfields["DATAOFS"], headerfields["ITEMCNT"], item_entries_size))
     encrypted_bytes = bytearray()
     try:
         encrypted_bytes.extend(DataStream.read(headerfields["DATAOFS"], item_entries_size, function_debug_level))
     except:
         DataStream.close(function_debug_level)
-        eprint("\nERROR: {}: Could not get PKG3 encrypted data at offset {:#x} with size {} from {}".format(sys.argv[0], headerfields["DATAOFS"], item_entries_size, Source))
+        eprint("\nERROR: {}: Could not get PKG3 encrypted data at offset {:#x} with fileSize {} from {}".format(sys.argv[0], headerfields["DATAOFS"], item_entries_size, Source))
         sys.exit(2)
 
     ## Decrypt PKG3 Item Entries
@@ -1217,13 +1221,13 @@ def parsePkg3ItemEntries(headerfields):
     ## Retrieve PKG3 Item Names from data stream
     aligned_offset, aligned_size, aligned_offset_delta, aligned_size_delta = calculateAesAlignedOffsetAndSize(name_offset_start, name_offset_end - name_offset_start + 1)
     if function_debug_level >= 2:
-        dprint("Get PKG3 item names from encrypted data with offset {:#x}(-{:#x}) and size {}(+{})".format(headerfields["DATAOFS"] + name_offset_start, aligned_offset_delta, name_size, aligned_size_delta))
+        dprint("Get PKG3 item names from encrypted data with offset {:#x}(-{:#x}) and fileSize {}(+{})".format(headerfields["DATAOFS"] + name_offset_start, aligned_offset_delta, name_size, aligned_size_delta))
     encrypted_bytes = bytearray()
     try:
         encrypted_bytes.extend(DataStream.read(headerfields["DATAOFS"] + aligned_offset, aligned_size, function_debug_level))
     except:
         DataStream.close(function_debug_level)
-        eprint("\nERROR: {}: Could not get PKG3 encrypted data at offset {:#x} with size {} from {}".format(sys.argv[0], aligned_offset, aligned_size, Source))
+        eprint("\nERROR: {}: Could not get PKG3 encrypted data at offset {:#x} with fileSize {} from {}".format(sys.argv[0], aligned_offset, aligned_size, Source))
         sys.exit(2)
 
     ## Decrypt and Parse PKG3 Item Names
@@ -1266,13 +1270,13 @@ def retrievePkg3Item(headerfields, item):
     ## Retrieve PKG3 Item Data from data stream
     aligned_offset, aligned_size, aligned_offset_delta, aligned_size_delta = calculateAesAlignedOffsetAndSize(item["DATAOFS"], item["DATASIZE"])
     if function_debug_level >= 2:
-        dprint("Get PKG3 item data from encrypted data with offset {:#x}(-{:#x}) and size {}(+{})".format(headerfields["DATAOFS"] + item["DATAOFS"], aligned_offset_delta, item["DATASIZE"], aligned_size_delta))
+        dprint("Get PKG3 item data from encrypted data with offset {:#x}(-{:#x}) and fileSize {}(+{})".format(headerfields["DATAOFS"] + item["DATAOFS"], aligned_offset_delta, item["DATASIZE"], aligned_size_delta))
     encrypted_bytes = bytearray()
     try:
         encrypted_bytes.extend(DataStream.read(headerfields["DATAOFS"] + aligned_offset, aligned_size, function_debug_level))
     except:
         DataStream.close(function_debug_level)
-        eprint("\nERROR: {}: Could not get PKG3 encrypted data at offset {:#x} with size {} from {}".format(sys.argv[0], aligned_offset, aligned_size, Source))
+        eprint("\nERROR: {}: Could not get PKG3 encrypted data at offset {:#x} with fileSize {} from {}".format(sys.argv[0], aligned_offset, aligned_size, Source))
         sys.exit(2)
 
     ## Decrypt PKG3 Item Data
@@ -1311,7 +1315,7 @@ def parseSfo(sfobytes):
         dprint(">>>>> SFO Index Table:")
     sfo_index_table_size = headerfields["COUNT"] * CONST_PARAM_SFO_INDEX_ENTRY_FIELDS["STRUCTURE_SIZE"]
     if function_debug_level >= 2:
-        dprint("Get SFO index table from offset {:#x} with count {} and size {}".format(CONST_PARAM_SFO_HEADER_FIELDS["STRUCTURE_SIZE"], headerfields["COUNT"], sfo_index_table_size))
+        dprint("Get SFO index table from offset {:#x} with count {} and fileSize {}".format(CONST_PARAM_SFO_HEADER_FIELDS["STRUCTURE_SIZE"], headerfields["COUNT"], sfo_index_table_size))
     tempbytes = sfobytes[CONST_PARAM_SFO_HEADER_FIELDS["STRUCTURE_SIZE"]:CONST_PARAM_SFO_HEADER_FIELDS["STRUCTURE_SIZE"]+sfo_index_table_size]
     sfovalues = collections.OrderedDict()
 
@@ -1481,21 +1485,21 @@ if __name__ == "__main__":
 
         ## Enrich structure format arrays
         ## --> PKG3 Main Header
-        finalizeBytesStructure(CONST_PKG3_MAIN_HEADER_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 Main Header", "{}[{:2}]: ofs {:#04x} size {:2} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PKG3_MAIN_HEADER_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 Main Header", "{}[{:2}]: ofs {:#04x} fileSize {:2} key {:12} = {}", DebugLevel)
         ## --> PKG3 PS3 0x40 Digest
-        finalizeBytesStructure(CONST_PKG3_PS3_DIGEST_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 PS3 0x40 Digest", "{}[{:1}]: ofs {:#04x} size {:2} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PKG3_PS3_DIGEST_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 PS3 0x40 Digest", "{}[{:1}]: ofs {:#04x} fileSize {:2} key {:12} = {}", DebugLevel)
         ## --> PKG3 Extended Header
-        finalizeBytesStructure(CONST_PKG3_EXT_HEADER_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 Ext Header", "{}[{:2}]: ofs {:#04x} size {:2} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PKG3_EXT_HEADER_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 Ext Header", "{}[{:2}]: ofs {:#04x} fileSize {:2} key {:12} = {}", DebugLevel)
         ## --> PKG3 Item Entry
-        finalizeBytesStructure(CONST_PKG3_ITEM_ENTRY_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 Item Entry", "{}[{:1}]: ofs {:#04x} size {:1} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PKG3_ITEM_ENTRY_FIELDS, CONST_PKG3_HEADER_ENDIAN, "PKG3 Item Entry", "{}[{:1}]: ofs {:#04x} fileSize {:1} key {:12} = {}", DebugLevel)
         ## --> PKG4 Main Header
-        finalizeBytesStructure(CONST_PKG4_MAIN_HEADER_FIELDS, CONST_PKG4_HEADER_ENDIAN, "PKG4 Main Header", "{}[{:2}]: ofs {:#05x} size {:3} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PKG4_MAIN_HEADER_FIELDS, CONST_PKG4_HEADER_ENDIAN, "PKG4 Main Header", "{}[{:2}]: ofs {:#05x} fileSize {:3} key {:12} = {}", DebugLevel)
         ## --> PKG4 File Entry
-        finalizeBytesStructure(CONST_PKG4_FILE_ENTRY_FIELDS, CONST_PKG4_HEADER_ENDIAN, "PKG4 File Entry", "{}[{:1}]: ofs {:#04x} size {:1} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PKG4_FILE_ENTRY_FIELDS, CONST_PKG4_HEADER_ENDIAN, "PKG4 File Entry", "{}[{:1}]: ofs {:#04x} fileSize {:1} key {:12} = {}", DebugLevel)
         ## --> PARAM.SFO Header
-        finalizeBytesStructure(CONST_PARAM_SFO_HEADER_FIELDS, CONST_PARAM_SFO_ENDIAN, "SFO Header", "{}[{:1}]: ofs {:#04x} size {:1} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PARAM_SFO_HEADER_FIELDS, CONST_PARAM_SFO_ENDIAN, "SFO Header", "{}[{:1}]: ofs {:#04x} fileSize {:1} key {:12} = {}", DebugLevel)
         ## --> PARAM.SFO Index Entry
-        finalizeBytesStructure(CONST_PARAM_SFO_INDEX_ENTRY_FIELDS, CONST_PARAM_SFO_ENDIAN, "SFO Index Entry", "{}[{:1}]: ofs {:#03x} size {:1} key {:12} = {}", DebugLevel)
+        finalizeBytesStructure(CONST_PARAM_SFO_INDEX_ENTRY_FIELDS, CONST_PARAM_SFO_ENDIAN, "SFO Index Entry", "{}[{:1}]: ofs {:#03x} fileSize {:1} key {:12} = {}", DebugLevel)
 
         ## Process paths and URLs
         for Source in Arguments:
@@ -1580,7 +1584,9 @@ if __name__ == "__main__":
                 Source = StreamData['pieces'][0]['url']
 
             ## Open PKG source
-            print("# >>>>>>>>>> PKG Source:", Source)
+            if not 97 in OutputFormats \
+            and not 98 in OutputFormats:  ## Special case JSON output for parsing
+                print("# >>>>>>>>>> PKG Source:", Source)
             DataStream = PkgReader(Source, Headers, DebugLevel)
             FileSize = DataStream.getSize(DebugLevel)
             if DebugLevel >= 2:
@@ -1611,20 +1617,20 @@ if __name__ == "__main__":
 
             ## Get rest of PKG main header from data stream
             if DebugLevel >= 2:
-                dprint("Get PKG main header from offset {:#x} with size {}".format(0, HeaderSize))
+                dprint("Get PKG main header from offset {:#x} with fileSize {}".format(0, HeaderSize))
             HeaderBytes.extend(DataStream.read(4, HeaderSize - 4, DebugLevel))
 
             ## Process GAME PKG main header data
             ## --> PKG3
             if PkgMagic == CONST_PKG3_MAGIC:
                 HeaderFields, ExtHeaderFields, MetaData = parsePkg3Header(HeaderBytes)
-                ## --> Size of package (=file size)
+                ## --> Size of package (=file fileSize)
                 if "TOTALSIZE" in HeaderFields:
                     PkgTotalSize = HeaderFields["TOTALSIZE"]
                 ## --> Package content id
                 if "CID" in HeaderFields:
                     PkgContentId = HeaderFields["CID"]
-                ## --> param.sfo offset + size
+                ## --> param.sfo offset + fileSize
                 if 0xE in MetaData:
                     PkgSfoOffset = MetaData[0xE]["OFS"]
                     PkgSfoSize = MetaData[0xE]["SIZE"]
@@ -1635,7 +1641,7 @@ if __name__ == "__main__":
                 if 0x2 in MetaData:
                     PkgContentType = MetaData[0x2]["VALUE"]
                 ## --> Title ID
-                if 0x6 in MetaData:  ## Version + App Version / TitleID (on size 0xC)
+                if 0x6 in MetaData:  ## Version + App Version / TitleID (on fileSize 0xC)
                     PkgTitleId = MetaData[0x6]["VALUE"]
                 ## --> Other flags for NPS Package Type
                 if 0xA in MetaData:
@@ -1667,13 +1673,13 @@ if __name__ == "__main__":
             ## --> PKG4
             elif PkgMagic == CONST_PKG4_MAGIC:
                 HeaderFields, FileTable, FileTableMap = parsePkg4Header(HeaderBytes)
-                ## --> Size of package (=file size)
+                ## --> Size of package (=file fileSize)
                 if "PKGSIZE" in HeaderFields:
                     PkgTotalSize = HeaderFields["PKGSIZE"]
                 ## --> Package content id
                 if "CID" in HeaderFields:
                     PkgContentId = HeaderFields["CID"]
-                ## --> param.sfo offset + size
+                ## --> param.sfo offset + fileSize
                 if CONST_PKG4_FILE_ENTRY_ID_PARAM_SFO in FileTableMap:
                     FileEntry = FileTable[FileTableMap[CONST_PKG4_FILE_ENTRY_ID_PARAM_SFO]]
                     PkgSfoOffset = FileEntry["DATAOFS"]
@@ -1700,13 +1706,13 @@ if __name__ == "__main__":
                     dprint(">>>>> PARAM.SFO:")
                 ## Get PARAM.SFO from data stream
                 if DebugLevel >= 2:
-                    dprint("Get PARAM.SFO from offset {:#x} with size {}".format(PkgSfoOffset, PkgSfoSize))
+                    dprint("Get PARAM.SFO from offset {:#x} with fileSize {}".format(PkgSfoOffset, PkgSfoSize))
                 SfoBytes = bytearray()
                 try:
                     SfoBytes.extend(DataStream.read(PkgSfoOffset, PkgSfoSize, DebugLevel))
                 except:
                     DataStream.close(DebugLevel)
-                    eprint("\nERROR: {}: Could not get PARAM.SFO at offset {:#x} with size {} from {}".format(sys.argv[0], PkgSfoOffset, PkgSfoSize, Source))
+                    eprint("\nERROR: {}: Could not get PARAM.SFO at offset {:#x} with fileSize {} from {}".format(sys.argv[0], PkgSfoOffset, PkgSfoSize, Source))
                     sys.exit(2)
 
             ## Process PARAM.SFO if present
@@ -1774,7 +1780,7 @@ if __name__ == "__main__":
                 if SfoValues \
                 and Key in SfoValues:
                    if DebugLevel >= 2:
-                       dprint("Set international name to", Key)
+                       dprint("Set international title to", Key)
                    SfoTitle = SfoValues[Key].strip()
                    break
             if not SfoTitle \
@@ -1864,21 +1870,21 @@ if __name__ == "__main__":
             elif PkgContentType == 0xD:
                 NpsType = "PS3 AVATAR"  #md_type = 9
             elif PkgContentType == 0x15:
-                NpsType = "VITA APP"  #md_type = 18
+                NpsType = "PSV GAME"  #md_type = 18
                 if SfoCategory == "gp":
-                    NpsType = "VITA UPDATE"
+                    NpsType = "PSV UPDATE"
                 if TitleId and TitleId.strip():
                     UpdateHash = Cryptodome.Hash.HMAC.new(CONST_PKG3_UPDATE_KEYS[2]["KEY"], digestmod=Cryptodome.Hash.SHA256)
                     UpdateHash.update("".join(("np_", TitleId)).encode("UTF-8"))
                     TitleUpdateUrl = "http://gs-sec.ww.np.dl.playstation.net/pl/np/{0}/{1}/{0}-ver.xml".format(TitleId, UpdateHash.hexdigest())
             elif PkgContentType == 0x16:
-                NpsType = "VITA DLC"  #md_type = 17
+                NpsType = "PSV DLC"  #md_type = 17
                 if TitleId and TitleId.strip():
                     UpdateHash = Cryptodome.Hash.HMAC.new(CONST_PKG3_UPDATE_KEYS[2]["KEY"], digestmod=Cryptodome.Hash.SHA256)
                     UpdateHash.update("".join(("np_", TitleId)).encode("UTF-8"))
                     TitleUpdateUrl = "http://gs-sec.ww.np.dl.playstation.net/pl/np/{0}/{1}/{0}-ver.xml".format(TitleId, UpdateHash.hexdigest())
             elif PkgContentType == 0x1F:
-                NpsType = "VITA THEME"  #md_type = 17
+                NpsType = "PSV THEME"  #md_type = 17
             elif PkgContentType == 0x18:
                 NpsType = "PSM GAME"  #md_type = 16
             else:
@@ -1973,6 +1979,57 @@ if __name__ == "__main__":
                         print("PSN_PKG_FILESIZE='{}'".format(FileSize))
                     else:
                         print("unset PSN_PKG_FILESIZE")
+                elif OutputFormat == 97 \
+                or OutputFormat == 98:  ## JSON Output formats
+                    json_output = {}
+                    if OutputFormat == 98:  ## Analysis JSON Output
+                        json_output["headerfields"] = HeaderFields
+                        if ExtHeaderFields:
+                            json_output["extheaderfields"] = ExtHeaderFields
+                        json_output["metadata"] = MetaData
+                        if SfoValues:
+                            json_output["PARAM.SFO"] = SfoValues
+                        if ItemEntries:
+                            json_output["itementries"] = ItemEntries
+                        if FileTable:
+                            json_output["filetable"] = FileTable
+                    json_output["nps"] = {}
+                    json_output["nps"]["npsType"] = NpsType
+                    if TitleId and TitleId.strip():
+                        json_output["nps"]["titleId"] = TitleId
+                    if SfoTitle:
+                        json_output["nps"]["title"] = SfoTitle
+                    if SfoTitleRegional:
+                        json_output["nps"]["regionalTitle"] = SfoTitleRegional
+                    if ContentId and ContentId.strip():
+                        json_output["nps"]["region"] = Region
+                    if SfoMinVer >= 0:
+                        json_output["nps"]["minFw"] = SfoMinVer
+                    if SfoSdkVer >= 0:
+                        json_output["nps"]["sdkVer"] = SfoSdkVer
+                    if SfoCreationDate and SfoCreationDate.strip():
+                        json_output["nps"]["creationDate"] = datetime.strptime(SfoCreationDate, "%Y%m%d").strftime("%Y.%m.%d")
+                    if SfoVersion >= 0:
+                        json_output["nps"]["version"] = SfoVersion
+                    if SfoAppVer >= 0:
+                        json_output["nps"]["appVer"] = SfoAppVer
+                    if PsxTitleId and PsxTitleId.strip():
+                        json_output["nps"]["psxTitleId"] = PsxTitleId
+                    if ContentId and ContentId.strip():
+                        json_output["nps"]["contentId"] = ContentId
+                        if SfoContentId and SfoContentId.strip() \
+                        and PkgContentId.strip() != SfoContentId.strip():
+                            json_output["nps"]["pkgContentId"] = PkgContentId
+                    json_output["nps"]["pkgTotalSize"] = PkgTotalSize
+                    json_output["nps"]["prettySize"] = prettySize(PkgTotalSize)
+                    if FileSize:
+                        json_output["nps"]["fileSize"] = FileSize
+                    if Source and Source.strip():
+                        json_output["nps"]["pkgUrl"] = Source
+                    if TitleUpdateUrl and TitleUpdateUrl.strip():
+                        json_output["nps"]["titleUpdateUrl"] = TitleUpdateUrl
+                    print(json.dumps(json_output, indent=2, default=to_json))
+                    del json_output
                 elif OutputFormat == 99:  ## Analysis Output
                     print("File Size:", FileSize)
                     if PkgMagic == CONST_PKG3_MAGIC:
@@ -2010,6 +2067,8 @@ if __name__ == "__main__":
                         dprintFieldsDict(FileTableMap, "filetablemap[{KEY:#06x}]", 2, None, print)
                     if SfoValues:
                         dprintFieldsDict(SfoValues, "sfovalues[{KEY:20}]", 2, None, print)
+        sys.stdout.flush()
+        sys.stderr.flush()
     except SystemExit:
         raise  ## re-raise/throw up (let Python handle it)
     except:
